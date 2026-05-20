@@ -749,6 +749,7 @@ export default function Home() {
     setStreamingActivity(null);
     setIsThinking(false);
     pendingThoughtsRef.current = [];
+    pendingReasoningRef.current = [];
 
     // Try SSE streaming first
     try {
@@ -1128,6 +1129,7 @@ export default function Home() {
     setStreamingActivity('Resuming orchestration...');
     setIsThinking(false);
     pendingThoughtsRef.current = [];
+    pendingReasoningRef.current = [];
 
     try {
       const response = await fetch(`/api/orchestrations/runs/${runId}/human-input`, {
@@ -1173,6 +1175,7 @@ export default function Home() {
       setStreamingActivity(null);
       setIsThinking(false);
       pendingThoughtsRef.current = [];
+      pendingReasoningRef.current = [];
     }
   };
 
