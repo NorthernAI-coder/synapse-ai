@@ -290,15 +290,23 @@ async def submit_human_input(run_id: str, request: Request):
             from core.scale.models_db import OrchestrationRunDB
             async with pg_session_factory() as session:
                 result = await session.execute(
-                    select(OrchestrationRunDB.worker_id).where(
+                    select(OrchestrationRunDB.worker_id, OrchestrationRunDB.tenant_id).where(
                         OrchestrationRunDB.run_id == run_id
                     )
                 )
                 row = result.one_or_none()
 
             if row and row.worker_id:
-                # V2 run: publish to Redis and enqueue resume job
+                # V2 run: publish to Redis and enqueue resume job to the correct shard queue
                 from core.scale.pubsub import publish_human_input
+                from core.scale.config import get_scale_config as _get_scale_cfg
+                import os as _os
+                _scale_cfg = _get_scale_cfg()
+                _queue_name = (
+                    f"synapse:orchestrations:{row.tenant_id or _scale_cfg.default_tenant_id}"
+                    if _scale_cfg.enable_tenant_isolation
+                    else f"synapse:orchestrations:{_os.getenv('WORKER_QUEUE_SHARD', 'default')}"
+                )
                 resp = human_response if isinstance(human_response, dict) else {"response": human_response}
                 await publish_human_input(redis, run_id, resp)
 
@@ -306,6 +314,7 @@ async def submit_human_input(run_id: str, request: Request):
                     "resume_orchestration_job",
                     run_id=run_id,
                     human_response=resp,
+                    _queue_name=_queue_name,
                     _job_id=f"resume_{run_id}_{int(time.time())}",
                 )
 

@@ -79,6 +79,65 @@ class WorkerServerModule:
                 )
                 instance.mcp_disabled.append(server_name)
 
+        # --- User-configured MCP servers (from Postgres or mcp_servers.json) ---
+        # Browser Automation (playwright) requires a local browser install — skip in workers.
+        _BROWSER_MCP_NAMES = {"Browser Automation", "browser", "playwright"}
+        _BROWSER_MCP_PKGS = {"@playwright/mcp", "playwright-mcp"}
+
+        from core.scale.context import resolve_mcp_servers
+        user_mcp_configs = await resolve_mcp_servers()
+        for cfg in user_mcp_configs:
+            server_name = cfg.get("name", "")
+            if not server_name or server_name in disabled:
+                continue
+            if not cfg.get("enabled", True):
+                continue
+            # Skip native servers already connected above
+            if server_name in instance.agent_sessions:
+                continue
+            # Skip browser/playwright MCP — requires a local browser install
+            if server_name in _BROWSER_MCP_NAMES:
+                instance.mcp_disabled.append(server_name)
+                continue
+            args_str = " ".join(str(a) for a in cfg.get("args", []))
+            if any(pkg in args_str for pkg in _BROWSER_MCP_PKGS):
+                instance.mcp_disabled.append(server_name)
+                continue
+            server_type = cfg.get("server_type", "stdio")
+            try:
+                if server_type == "remote":
+                    params = _build_remote_mcp_params(cfg)
+                    if params is None:
+                        instance.mcp_disabled.append(server_name)
+                        continue
+                    from mcp.client.sse import sse_client
+                    read, write = await exit_stack.enter_async_context(
+                        sse_client(params["url"], headers=params.get("headers", {}))
+                    )
+                else:
+                    params = _build_stdio_mcp_params(cfg)
+                    if params is None:
+                        instance.mcp_disabled.append(server_name)
+                        continue
+                    read, write = await exit_stack.enter_async_context(
+                        stdio_client(params)
+                    )
+                session = await exit_stack.enter_async_context(
+                    ClientSession(read, write, read_timeout_seconds=_SESSION_READ_TIMEOUT)
+                )
+                await session.initialize()
+                instance.agent_sessions[server_name] = session
+                tools_result = await session.list_tools()
+                for tool in tools_result.tools:
+                    instance.tool_router[tool.name] = (server_name, tool.name)
+                print(f"[worker_server_module] Connected user MCP '{server_name}'", flush=True)
+            except Exception as e:
+                print(
+                    f"[worker_server_module] Skipping user MCP '{server_name}': {e}",
+                    flush=True,
+                )
+                instance.mcp_disabled.append(server_name)
+
         # Memory store: try Postgres-backed if SCALE_POSTGRES_URL is set
         try:
             import os
@@ -100,84 +159,36 @@ class WorkerServerModule:
 
 
 def _get_native_mcp_servers(tools_dir: Path, backend_root: Path) -> dict:
-    """Return the same native MCP server configs as the main server.py lifespan."""
+    """Return native MCP server configs for the worker process.
+
+    Uses core.tools_registry as the single source of truth for tool filenames.
+    WORKER_NATIVE_TOOLS / WORKER_NPX_TOOLS control what runs in workers vs. not.
+    """
     import os
-    from core.config import DATA_DIR
+    from pathlib import Path as _Path
     from mcp import StdioServerParameters
+    from core.tools_registry import ALL_NATIVE_TOOLS, WORKER_NATIVE_TOOLS, WORKER_NPX_TOOLS
+
+    # Tool subprocesses need the backend root on PYTHONPATH so they can do
+    # `from core.config import ...` — same as when the main server spawns them.
+    tool_env = os.environ.copy()
+    existing_pp = tool_env.get("PYTHONPATH", "")
+    backend_root_str = str(backend_root)
+    tool_env["PYTHONPATH"] = f"{backend_root_str}{os.pathsep}{existing_pp}" if existing_pp else backend_root_str
 
     servers = {}
 
-    # Time server
-    time_script = tools_dir / "time_server.py"
-    if time_script.exists():
-        servers["time"] = StdioServerParameters(
-            command=sys.executable,
-            args=[str(time_script)],
-        )
+    # Python-native tools (subset safe for headless worker processes)
+    for name in WORKER_NATIVE_TOOLS:
+        script = _Path(ALL_NATIVE_TOOLS[name])
+        if script.exists():
+            servers[name] = StdioServerParameters(command=sys.executable, args=[str(script)], env=tool_env)
+        else:
+            print(f"[worker_server_module] Tool script not found, skipping '{name}': {script}", flush=True)
 
-    # SQL server
-    sql_script = tools_dir / "sql_server.py"
-    if sql_script.exists():
-        servers["sql"] = StdioServerParameters(
-            command=sys.executable,
-            args=[str(sql_script)],
-        )
-
-    # Personal details server
-    personal_script = tools_dir / "personal_details_server.py"
-    if personal_script.exists():
-        servers["personal_details"] = StdioServerParameters(
-            command=sys.executable,
-            args=[str(personal_script)],
-        )
-
-    # Collect data server
-    collect_script = tools_dir / "collect_data_server.py"
-    if collect_script.exists():
-        servers["collect_data"] = StdioServerParameters(
-            command=sys.executable,
-            args=[str(collect_script)],
-        )
-
-    # PDF parser
-    pdf_script = tools_dir / "pdf_parser_server.py"
-    if pdf_script.exists():
-        servers["pdf_parser"] = StdioServerParameters(
-            command=sys.executable,
-            args=[str(pdf_script)],
-        )
-
-    # XLSX parser
-    xlsx_script = tools_dir / "xlsx_parser_server.py"
-    if xlsx_script.exists():
-        servers["xlsx_parser"] = StdioServerParameters(
-            command=sys.executable,
-            args=[str(xlsx_script)],
-        )
-
-    # Vault sandbox
-    vault_script = tools_dir / "vault_sandbox_server.py"
-    if vault_script.exists():
-        servers["vault_sandbox"] = StdioServerParameters(
-            command=sys.executable,
-            args=[str(vault_script)],
-        )
-
-    # Web scraper
-    web_scraper_script = tools_dir / "web_scraper_server.py"
-    if web_scraper_script.exists():
-        servers["web_scraper"] = StdioServerParameters(
-            command=sys.executable,
-            args=[str(web_scraper_script)],
-        )
-
-    # Bash server
-    bash_script = tools_dir / "bash_server.py"
-    if bash_script.exists():
-        servers["bash"] = StdioServerParameters(
-            command=sys.executable,
-            args=[str(bash_script)],
-        )
+    # npx-based tools available to workers
+    for name, args in WORKER_NPX_TOOLS.items():
+        servers[name] = StdioServerParameters(command=_NPX_CMD, args=args)
 
     # Filesystem MCP (Node.js) — point to SYNAPSE_DATA_DIR
     data_dir = os.getenv("SYNAPSE_DATA_DIR", str(backend_root / "data"))
@@ -190,3 +201,32 @@ def _get_native_mcp_servers(tools_dir: Path, backend_root: Path) -> dict:
         )
 
     return servers
+
+
+def _build_stdio_mcp_params(cfg: dict):
+    """Build StdioServerParameters from a saved mcp_servers.json config dict."""
+    import shlex
+    from mcp import StdioServerParameters
+
+    command = cfg.get("command", "")
+    if not command:
+        return None
+    args_raw = cfg.get("args", [])
+    # Support both list and space-separated string for args
+    if isinstance(args_raw, str):
+        args_raw = shlex.split(args_raw)
+    env = cfg.get("env") or {}
+    return StdioServerParameters(command=command, args=list(args_raw), env=env or None)
+
+
+def _build_remote_mcp_params(cfg: dict) -> dict | None:
+    """Build connection params dict for an SSE/HTTP MCP server."""
+    url = cfg.get("url", "")
+    if not url:
+        return None
+    # Token was stripped during sync; if present (JSON fallback path), include it
+    token = cfg.get("token", "")
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return {"url": url, "headers": headers}

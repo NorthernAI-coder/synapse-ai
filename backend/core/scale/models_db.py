@@ -72,6 +72,20 @@ class ToolDB(Base):
     )
 
 
+class MCPServerDB(Base):
+    __tablename__ = "mcp_servers"
+
+    name = Column(String(255), primary_key=True)   # unique server identifier
+    label = Column(String(500), nullable=False, default="")
+    definition = Column(JSONB, nullable=False)       # full config dict (token stripped)
+    tenant_id = Column(String(255), default="default", nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+    __table_args__ = (
+        Index("idx_mcp_servers_tenant", "tenant_id"),
+    )
+
+
 class SettingDB(Base):
     """Key-value store for settings synced from settings.json.
     Workers load LLM keys from here instead of the local JSON file."""

@@ -19,6 +19,10 @@ import asyncio
 # Ensure backend/ is on sys.path so `from core.xxx` works
 sys.path.insert(0, os.path.dirname(__file__))
 
+# Mark this process as a scale worker — all resolvers will prefer Postgres
+import core.scale.context as _scale_ctx  # noqa: E402
+_scale_ctx.IS_SCALE_WORKER = True
+
 
 # ---------------------------------------------------------------------------
 # Health server (runs in a thread, separate from ARQ event loop)

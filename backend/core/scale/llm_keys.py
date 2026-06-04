@@ -34,6 +34,13 @@ _KEY_TO_ENV = {
     "aws_session_token": "AWS_SESSION_TOKEN",
     "aws_region": "AWS_DEFAULT_REGION",
     "bedrock_api_key": "BEDROCK_API_KEY",
+    # S3 storage — workers use these for vault + log uploads
+    "s3_bucket": "S3_BUCKET",
+    "s3_region": "S3_REGION",
+    "s3_prefix": "S3_PREFIX",
+    "s3_access_key_id": "S3_ACCESS_KEY_ID",
+    "s3_secret_access_key": "S3_SECRET_ACCESS_KEY",
+    "s3_endpoint_url": "S3_ENDPOINT_URL",
 }
 
 

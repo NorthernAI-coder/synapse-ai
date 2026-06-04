@@ -130,7 +130,7 @@ async def _check_tenant_quota(session_factory, tenant_id: str, redis) -> None:
 async def _check_global_queue_depth(redis, queue_name: str, max_depth: int) -> None:
     """Raise 503 if the global queue depth exceeds the configured maximum."""
     try:
-        depth = await redis.llen(queue_name)
+        depth = await redis.zcard(queue_name)
         if depth >= max_depth:
             raise HTTPException(
                 status_code=503,
@@ -393,6 +393,32 @@ async def v2_resume_run(
     arq_redis = _get_arq_redis(request)
     sf = _get_pg_session_factory(request)
 
+    # Resolve the shard queue this run was originally enqueued to so the
+    # resume job lands on the same worker that checkpointed the paused state.
+    import os
+    from sqlalchemy import select
+    from core.scale.models_db import OrchestrationRunDB
+    from core.scale.config import get_scale_config
+
+    cfg = get_scale_config()
+    async with sf() as session:
+        result = await session.execute(
+            select(OrchestrationRunDB.tenant_id, OrchestrationRunDB.status).where(OrchestrationRunDB.run_id == run_id)
+        )
+        run_row = result.first()
+    if not run_row:
+        raise HTTPException(404, detail=f"Run '{run_id}' not found.")
+    if run_row.status in ("completed", "failed", "cancelled"):
+        raise HTTPException(409, detail=f"Run '{run_id}' is already {run_row.status} and cannot be resumed.")
+    run_tenant_id = (run_row.tenant_id or cfg.default_tenant_id)
+    print("Resuming run", run_id, "for tenant", run_tenant_id)
+    queue_name = (
+        f"synapse:orchestrations:{run_tenant_id}"
+        if cfg.enable_tenant_isolation
+        else f"synapse:orchestrations:{os.getenv('WORKER_QUEUE_SHARD', 'default')}"
+    )
+
+    print("Queue name for resume:", queue_name)
     # Publish human input to Redis so workers polling for it can pick it up
     from core.scale.pubsub import publish_human_input
     resp = body.response
@@ -400,13 +426,14 @@ async def v2_resume_run(
         resp = {"response": resp}
     await publish_human_input(redis, run_id, resp)
 
-    # Also enqueue a resume job in case the worker already returned
+    # Enqueue resume job to the correct shard queue
     await arq_redis.enqueue_job(
         "resume_orchestration_job",
         run_id=run_id,
         human_response=resp,
         webhook_url=body.webhook_url,
         webhook_secret=body.webhook_secret,
+        _queue_name=queue_name,
         _job_id=f"resume_{run_id}_{int(time.time())}",
     )
 
@@ -623,7 +650,7 @@ async def v2_queue_stats(
     queue_name = f"synapse:orchestrations:{os.getenv('WORKER_QUEUE_SHARD', 'default')}"
 
     try:
-        queued = await redis.llen(queue_name) or 0
+        queued = await redis.zcard(queue_name) or 0
     except Exception:
         queued = 0
 

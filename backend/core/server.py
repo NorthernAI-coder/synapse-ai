@@ -86,18 +86,8 @@ _settings = load_settings()
 if _settings.get("ollama_base_url"):
     os.environ["OLLAMA_BASE_URL"] = _settings["ollama_base_url"]
 
-TOOLS_LIST = {
-    "time": str(TOOLS_DIR / "time.py"),
-    "sql": str(TOOLS_DIR / "sql_agent.py"),
-    "personal_details": str(TOOLS_DIR / "personal_details.py"),
-    "collect_data": str(TOOLS_DIR / "collect_data.py"),
-    "pdf_parser": str(TOOLS_DIR / "pdf_parser.py"),
-    "xlsx_parser": str(TOOLS_DIR / "xlsx_parser.py"),
-    "vault_sandbox": str(TOOLS_DIR / "sandbox.py"),
-    "code_vault_search": str(TOOLS_DIR / "code_search.py"),
-    "web_scraper": str(TOOLS_DIR / "web_scraper.py"),
-    "bash": str(TOOLS_DIR / "bash.py"),
-}
+from core.tools_registry import ALL_NATIVE_TOOLS
+TOOLS_LIST = dict(ALL_NATIVE_TOOLS)
 
 REPOS_FILE = DATA_DIR / "repos.json"
 
@@ -778,7 +768,7 @@ app.include_router(builder_router)
 app.include_router(api_keys_router)
 app.include_router(api_v1_router, prefix="/api/v1")
 app.include_router(api_v2_router, prefix="/api/v2")
-app.include_router(scale_router)
+app.include_router(scale_router, prefix="/api")
 
 if __name__ == "__main__":
     import uvicorn

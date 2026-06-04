@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState, useEffect, useCallback } from 'react';
-import { Loader2, CheckCircle2, XCircle, RefreshCw, Trash2, Plus, AlertTriangle, Activity, Server, Database, Zap, Users, Eye } from 'lucide-react';
+import { Loader2, CheckCircle2, XCircle, RefreshCw, Trash2, Plus, AlertTriangle, Activity, Server, Database, Zap, Users, Eye, Cloud } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -19,6 +19,13 @@ interface ScaleConfig {
     rate_limit_per_tenant_rps: number;
     pgbouncer_mode: boolean;
     num_queue_shards: number;
+    // S3 storage
+    s3_bucket: string;
+    s3_region: string;
+    s3_prefix: string;
+    s3_access_key_id: string;
+    s3_secret_access_key: string;
+    s3_endpoint_url: string;
 }
 
 interface SyncStatus {
@@ -75,6 +82,12 @@ const DEFAULT_CONFIG: ScaleConfig = {
     rate_limit_per_tenant_rps: 1000,
     pgbouncer_mode: false,
     num_queue_shards: 1,
+    s3_bucket: '',
+    s3_region: 'us-east-1',
+    s3_prefix: 'synapse',
+    s3_access_key_id: '',
+    s3_secret_access_key: '',
+    s3_endpoint_url: '',
 };
 
 // ---------------------------------------------------------------------------
@@ -125,6 +138,8 @@ export function ScaleTab() {
     const [redisStatus, setRedisStatus] = useState<{ ok: boolean; msg: string } | null>(null);
     const [pgTesting, setPgTesting] = useState(false);
     const [pgStatus, setPgStatus] = useState<{ ok: boolean; msg: string } | null>(null);
+    const [s3Testing, setS3Testing] = useState(false);
+    const [s3Status, setS3Status] = useState<{ ok: boolean; msg: string } | null>(null);
 
     // Sync state
     const [syncing, setSyncing] = useState(false);
@@ -258,6 +273,31 @@ export function ScaleTab() {
         }
     };
 
+    const testS3 = async () => {
+        setS3Testing(true);
+        setS3Status(null);
+        try {
+            const r = await fetch('/api/scale/test-s3', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    s3_bucket: config.s3_bucket,
+                    s3_region: config.s3_region,
+                    s3_prefix: config.s3_prefix,
+                    s3_access_key_id: config.s3_access_key_id,
+                    s3_secret_access_key: config.s3_secret_access_key,
+                    s3_endpoint_url: config.s3_endpoint_url,
+                }),
+            });
+            const d = await r.json();
+            setS3Status({ ok: d.ok, msg: d.ok ? 'Connection successful' : (d.error || 'Connection failed') });
+        } catch (e) {
+            setS3Status({ ok: false, msg: String(e) });
+        } finally {
+            setS3Testing(false);
+        }
+    };
+
     const triggerSync = async () => {
         setSyncing(true);
         setSyncResult(null);
@@ -383,7 +423,7 @@ export function ScaleTab() {
                         <label className="relative inline-flex items-center cursor-pointer">
                             <input type="checkbox" className="sr-only peer" {...toggle('scale_mode_enabled')} />
                             <div className="w-11 h-6 bg-zinc-700 rounded-full peer peer-checked:bg-zinc-100 transition-colors" />
-                            <div className="absolute left-1 top-1 bg-white w-4 h-4 rounded-full transition-transform peer-checked:translate-x-5" />
+                            <div className="absolute left-1 top-1 bg-white peer-checked:bg-zinc-950 w-4 h-4 rounded-full transition-all peer-checked:translate-x-5" />
                         </label>
                     </div>
 
@@ -446,7 +486,7 @@ export function ScaleTab() {
                         <label className="relative inline-flex items-center cursor-pointer">
                             <input type="checkbox" className="sr-only peer" {...toggle('pgbouncer_mode')} />
                             <div className="w-11 h-6 bg-zinc-700 rounded-full peer peer-checked:bg-zinc-100 transition-colors" />
-                            <div className="absolute left-1 top-1 bg-white w-4 h-4 rounded-full transition-transform peer-checked:translate-x-5" />
+                            <div className="absolute left-1 top-1 bg-white peer-checked:bg-zinc-950 w-4 h-4 rounded-full transition-all peer-checked:translate-x-5" />
                         </label>
                     </div>
 
@@ -458,7 +498,7 @@ export function ScaleTab() {
                         <label className="relative inline-flex items-center cursor-pointer">
                             <input type="checkbox" className="sr-only peer" {...toggle('scale_auto_sync')} />
                             <div className="w-11 h-6 bg-zinc-700 rounded-full peer peer-checked:bg-zinc-100 transition-colors" />
-                            <div className="absolute left-1 top-1 bg-white w-4 h-4 rounded-full transition-transform peer-checked:translate-x-5" />
+                            <div className="absolute left-1 top-1 bg-white peer-checked:bg-zinc-950 w-4 h-4 rounded-full transition-all peer-checked:translate-x-5" />
                         </label>
                     </div>
 
@@ -496,7 +536,103 @@ export function ScaleTab() {
                 </div>
             </div>
 
-            {/* ── Section 3: Workers ──────────────────────────────────────── */}
+            {/* ── Section 3: Storage (S3) ─────────────────────────────────── */}
+            <div className="border border-zinc-800 p-6">
+                <SectionHeader
+                    icon={Cloud}
+                    title="Storage (S3)"
+                    subtitle="When configured, vault files and run logs are stored in S3 — shared across all workers."
+                />
+
+                <div className="space-y-4">
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <label className="text-xs uppercase font-bold text-zinc-500 tracking-wider block mb-1.5">S3 Bucket</label>
+                            <input
+                                type="text"
+                                placeholder="my-synapse-bucket"
+                                className="w-full bg-zinc-900 border border-zinc-700 text-zinc-100 text-sm px-3 py-2 font-mono focus:outline-none focus:border-zinc-500"
+                                {...field('s3_bucket')}
+                            />
+                        </div>
+                        <div>
+                            <label className="text-xs uppercase font-bold text-zinc-500 tracking-wider block mb-1.5">Region</label>
+                            <input
+                                type="text"
+                                placeholder="us-east-1"
+                                className="w-full bg-zinc-900 border border-zinc-700 text-zinc-100 text-sm px-3 py-2 font-mono focus:outline-none focus:border-zinc-500"
+                                {...field('s3_region')}
+                            />
+                        </div>
+                    </div>
+
+                    <div>
+                        <label className="text-xs uppercase font-bold text-zinc-500 tracking-wider block mb-1.5">Key Prefix</label>
+                        <input
+                            type="text"
+                            placeholder="synapse"
+                            className="w-full bg-zinc-900 border border-zinc-700 text-zinc-100 text-sm px-3 py-2 font-mono focus:outline-none focus:border-zinc-500"
+                            {...field('s3_prefix')}
+                        />
+                        <p className="text-[10px] text-zinc-600 mt-1">All objects are stored under this prefix. Useful for multi-tenant setups.</p>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <label className="text-xs uppercase font-bold text-zinc-500 tracking-wider block mb-1.5">Access Key ID</label>
+                            <input
+                                type="text"
+                                placeholder="AKIA... (optional)"
+                                className="w-full bg-zinc-900 border border-zinc-700 text-zinc-100 text-sm px-3 py-2 font-mono focus:outline-none focus:border-zinc-500"
+                                {...field('s3_access_key_id')}
+                            />
+                        </div>
+                        <div>
+                            <label className="text-xs uppercase font-bold text-zinc-500 tracking-wider block mb-1.5">Secret Access Key</label>
+                            <input
+                                type="password"
+                                placeholder="••••••••"
+                                className="w-full bg-zinc-900 border border-zinc-700 text-zinc-100 text-sm px-3 py-2 font-mono focus:outline-none focus:border-zinc-500"
+                                {...field('s3_secret_access_key')}
+                            />
+                        </div>
+                    </div>
+
+                    <div>
+                        <label className="text-xs uppercase font-bold text-zinc-500 tracking-wider block mb-1.5">Endpoint URL <span className="text-zinc-600 font-normal normal-case">(optional — for MinIO, Cloudflare R2, etc.)</span></label>
+                        <input
+                            type="text"
+                            placeholder="https://account.r2.cloudflarestorage.com"
+                            className="w-full bg-zinc-900 border border-zinc-700 text-zinc-100 text-sm px-3 py-2 font-mono focus:outline-none focus:border-zinc-500"
+                            {...field('s3_endpoint_url')}
+                        />
+                    </div>
+
+                    <div className="flex items-center gap-3 pt-1">
+                        <button
+                            onClick={testS3}
+                            disabled={s3Testing || !config.s3_bucket}
+                            className="px-4 py-2 text-xs font-bold uppercase tracking-wider bg-zinc-800 text-zinc-300 hover:bg-zinc-700 disabled:opacity-40 transition-colors flex items-center gap-2"
+                        >
+                            {s3Testing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Cloud className="h-3 w-3" />}
+                            Test S3 Connection
+                        </button>
+                        {s3Status && (
+                            <p className={`text-xs flex items-center gap-1.5 ${s3Status.ok ? 'text-emerald-400' : 'text-red-400'}`}>
+                                {s3Status.ok ? <CheckCircle2 className="h-3 w-3" /> : <XCircle className="h-3 w-3" />}
+                                {s3Status.msg}
+                            </p>
+                        )}
+                    </div>
+
+                    <p className="text-[10px] text-zinc-600">
+                        Leave Access Key / Secret blank to use IAM role or environment credentials.
+                        Vault files and run logs will be read and written from this bucket when scale mode is active.
+                    </p>
+                </div>
+            </div>
+
+            {/* ── Section 4: Workers ──────────────────────────────────────── */}
             <div className="border border-zinc-800 p-6">
                 <SectionHeader
                     icon={Server}
@@ -585,7 +721,7 @@ export function ScaleTab() {
                 </div>
             </div>
 
-            {/* ── Section 4: Queue & DLQ ──────────────────────────────────── */}
+            {/* ── Section 5: Queue & DLQ ──────────────────────────────────── */}
             <div className="border border-zinc-800 p-6">
                 <SectionHeader
                     icon={Activity}
@@ -661,7 +797,7 @@ export function ScaleTab() {
                 )}
             </div>
 
-            {/* ── Section 5: Tenants ──────────────────────────────────────── */}
+            {/* ── Section 6: Tenants ──────────────────────────────────────── */}
             <div className="border border-zinc-800 p-6">
                 <SectionHeader
                     icon={Users}
@@ -702,7 +838,7 @@ export function ScaleTab() {
                 </div>
             </div>
 
-            {/* ── Section 6: Observability ────────────────────────────────── */}
+            {/* ── Section 7: Observability ────────────────────────────────── */}
             <div className="border border-zinc-800 p-6">
                 <SectionHeader
                     icon={Activity}

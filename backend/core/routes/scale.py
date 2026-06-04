@@ -28,6 +28,13 @@ class ScaleConfigUpdate(BaseModel):
     pgbouncer_mode: bool = False
     redis_cluster_mode: bool = False
     num_queue_shards: int = 1
+    # S3 storage
+    s3_bucket: str = ""
+    s3_region: str = "us-east-1"
+    s3_prefix: str = "synapse"
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_endpoint_url: str = ""
 
 
 @router.get("/scale/config")
@@ -46,6 +53,12 @@ async def get_scale_config_route():
         "rate_limit_per_tenant_rps": settings.get("rate_limit_per_tenant_rps", 1000),
         "pgbouncer_mode": settings.get("pgbouncer_mode", False),
         "num_queue_shards": settings.get("num_queue_shards", 1),
+        "s3_bucket": settings.get("s3_bucket", ""),
+        "s3_region": settings.get("s3_region", "us-east-1"),
+        "s3_prefix": settings.get("s3_prefix", "synapse"),
+        "s3_access_key_id": settings.get("s3_access_key_id", ""),
+        "s3_secret_access_key": settings.get("s3_secret_access_key", ""),
+        "s3_endpoint_url": settings.get("s3_endpoint_url", ""),
     }
 
 
@@ -68,14 +81,48 @@ async def update_scale_config_route(body: ScaleConfigUpdate):
         "rate_limit_per_tenant_rps": body.rate_limit_per_tenant_rps,
         "pgbouncer_mode": body.pgbouncer_mode,
         "num_queue_shards": body.num_queue_shards,
+        "s3_bucket": body.s3_bucket,
+        "s3_region": body.s3_region,
+        "s3_prefix": body.s3_prefix,
+        "s3_access_key_id": body.s3_access_key_id,
+        "s3_secret_access_key": body.s3_secret_access_key,
+        "s3_endpoint_url": body.s3_endpoint_url,
     })
     store.save(settings)
+    # Invalidate the S3 singleton so the new config is picked up immediately
+    from core.s3_storage import invalidate_s3_singleton
+    invalidate_s3_singleton()
     return {"status": "saved"}
 
 
 # ---------------------------------------------------------------------------
 # Connection testing
 # ---------------------------------------------------------------------------
+
+class S3TestRequest(BaseModel):
+    s3_bucket: str
+    s3_region: str = "us-east-1"
+    s3_prefix: str = "synapse"
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_endpoint_url: str = ""
+
+
+@router.post("/scale/test-s3")
+async def test_s3_connection(body: S3TestRequest):
+    from core.s3_storage import SynapseS3
+    if not body.s3_bucket:
+        raise HTTPException(400, detail="s3_bucket is required")
+    client = SynapseS3(
+        bucket=body.s3_bucket,
+        region=body.s3_region,
+        prefix=body.s3_prefix,
+        access_key_id=body.s3_access_key_id,
+        secret_access_key=body.s3_secret_access_key,
+        endpoint_url=body.s3_endpoint_url,
+    )
+    return client.test_connection()
+
 
 @router.post("/scale/test-redis")
 async def test_redis_connection(request: Request):
@@ -242,11 +289,21 @@ async def queue_stats(request: Request):
     if not redis:
         return {"available": False}
 
-    import os
-    queue_name = f"synapse:orchestrations:{os.getenv('WORKER_QUEUE_SHARD', 'default')}"
+    from core.scale.config import get_scale_config
+    cfg = get_scale_config()
 
+    # ARQ stores pending jobs in a Redis sorted set (ZSET), not a list.
+    # Sum across all shards when num_queue_shards > 1.
+    queued = 0
     try:
-        queued = await redis.llen(queue_name) or 0
+        if cfg.num_queue_shards > 1:
+            import asyncio
+            shard_names = [f"synapse:orchestrations:{i}" for i in range(cfg.num_queue_shards)]
+            counts = await asyncio.gather(*[redis.zcard(q) for q in shard_names], return_exceptions=True)
+            queued = sum(c for c in counts if isinstance(c, int))
+        else:
+            queue_name = f"synapse:orchestrations:{cfg.default_tenant_id if cfg.enable_tenant_isolation else 'default'}"
+            queued = await redis.zcard(queue_name) or 0
     except Exception:
         queued = 0
 
@@ -289,7 +346,6 @@ async def queue_stats(request: Request):
 
     return {
         "available": True,
-        "queue_name": queue_name,
         "queued": queued,
         "active": active,
         "failed": failed,

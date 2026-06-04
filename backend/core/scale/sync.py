@@ -13,6 +13,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from core.scale.models_db import (
     AgentDB,
+    MCPServerDB,
     OrchestrationDB,
     SettingDB,
     ToolDB,
@@ -172,7 +173,59 @@ _LLM_SETTING_KEYS = [
     "prompt_cache_enabled", "transform_runtime",
     "vault_enabled", "vault_threshold",
     "allow_db_write",
+    # S3 storage — needed by workers for vault + log uploads
+    "s3_bucket", "s3_region", "s3_prefix",
+    "s3_access_key_id", "s3_secret_access_key", "s3_endpoint_url",
 ]
+
+
+async def sync_mcp_servers_to_pg(
+    session: AsyncSession,
+    tenant_id: str = "default",
+) -> dict:
+    """Upsert all MCP server configs from local JSON into Postgres.
+    Sensitive fields (token) are stripped before storing."""
+    try:
+        from core.mcp_client import MCP_SERVERS_FILE
+        with open(MCP_SERVERS_FILE) as f:
+            items = json.load(f)
+        if not isinstance(items, list):
+            items = []
+    except Exception as e:
+        return {"synced": 0, "errors": [str(e)]}
+
+    _STRIP_FIELDS = {"token", "status"}
+
+    synced = 0
+    errors = []
+    for item in items:
+        name = item.get("name", "")
+        if not name:
+            continue
+        try:
+            safe_def = {k: v for k, v in item.items() if k not in _STRIP_FIELDS}
+            stmt = pg_insert(MCPServerDB).values(
+                name=name,
+                label=item.get("label", name),
+                definition=safe_def,
+                tenant_id=tenant_id,
+                updated_at=datetime.now(timezone.utc),
+            ).on_conflict_do_update(
+                index_elements=["name"],
+                set_={
+                    "label": item.get("label", name),
+                    "definition": safe_def,
+                    "tenant_id": tenant_id,
+                    "updated_at": datetime.now(timezone.utc),
+                },
+            )
+            await session.execute(stmt)
+            synced += 1
+        except Exception as e:
+            errors.append(f"mcp_server {name}: {e}")
+
+    await session.commit()
+    return {"synced": synced, "errors": errors}
 
 
 async def sync_settings_to_pg(session: AsyncSession) -> dict:
@@ -220,6 +273,7 @@ async def full_sync(
     results["orchestrations"] = await sync_orchestrations_to_pg(session, tenant_id)
     results["agents"] = await sync_agents_to_pg(session, tenant_id)
     results["tools"] = await sync_tools_to_pg(session, tenant_id)
+    results["mcp_servers"] = await sync_mcp_servers_to_pg(session, tenant_id)
     results["settings"] = await sync_settings_to_pg(session)
 
     total_synced = sum(r.get("synced", 0) for r in results.values())
@@ -242,6 +296,7 @@ async def get_sync_status(session: AsyncSession) -> dict:
         (OrchestrationDB, "orchestrations"),
         (AgentDB, "agents"),
         (ToolDB, "tools"),
+        (MCPServerDB, "mcp_servers"),
         (SettingDB, "settings"),
     ]:
         result = await session.execute(select(func.count()).select_from(model))

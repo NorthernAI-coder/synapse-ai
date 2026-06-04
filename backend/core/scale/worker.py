@@ -200,6 +200,8 @@ async def resume_orchestration_job(
     server_module = ctx["server_module"]
 
     try:
+        print(f"[resume] ▶ job picked up run_id={run_id} human_response_keys={list(human_response.keys()) if isinstance(human_response, dict) else type(human_response).__name__}", flush=True)
+
         # Load run to find orchestration_id
         async with session_factory() as session:
             from core.scale.models_db import OrchestrationRunDB
@@ -211,11 +213,32 @@ async def resume_orchestration_job(
             if not row:
                 raise ValueError(f"Run {run_id} not found in Postgres")
             orch_id = row.orchestration_id
+            print(f"[resume] 📋 loaded run from DB: orch_id={orch_id} status={row.status} current_step_id={row.current_step_id} waiting_for_human={row.waiting_for_human}", flush=True)
 
         orch = await _load_orchestration(session_factory, orch_id)
+        print(f"[resume] 📦 orchestration loaded from Postgres: id={orch.id} name={orch.name} steps={len(orch.steps)}", flush=True)
 
         from core.scale.pubsub import RunEventPublisher
         publisher = RunEventPublisher(redis, run_id, ttl=cfg.pubsub_event_ttl)
+
+        # Mark run as picked up: transition paused → running so status polling reflects activity
+        async with session_factory() as session:
+            from sqlalchemy import update
+            from core.scale.models_db import OrchestrationRunDB
+            await session.execute(
+                update(OrchestrationRunDB)
+                .where(OrchestrationRunDB.run_id == run_id)
+                .values(
+                    status="running",
+                    waiting_for_human=False,
+                    worker_id=_worker_id,
+                    job_id=ctx.get("job_id", ""),
+                )
+            )
+            await session.commit()
+        print(f"[resume] ✅ DB status set to 'running', waiting_for_human=False", flush=True)
+
+        await publisher.publish({"type": "worker_picked_up", "worker_id": _worker_id, "run_id": run_id})
 
         from core.scale.worker_engine_adapter import WorkerEngineAdapter
         adapter = WorkerEngineAdapter(
@@ -228,7 +251,9 @@ async def resume_orchestration_job(
             worker_id=_worker_id,
             job_id=ctx.get("job_id", ""),
         )
+        print(f"[resume] 🔄 calling adapter.resume() ...", flush=True)
         final_status = await adapter.resume(human_response=human_response)
+        print(f"[resume] 🏁 adapter.resume() returned final_status={final_status}", flush=True)
 
         if webhook_url and final_status != "paused":
             await _deliver_webhook_for_run(
@@ -242,6 +267,32 @@ async def resume_orchestration_job(
 
     except Exception as exc:
         print(f"[worker] resume_orchestration_job ERROR {run_id}: {exc}", flush=True)
+
+        # Mirror run_orchestration_job: mark failed in Postgres so it doesn't stay "paused"
+        try:
+            async with session_factory() as session:
+                from sqlalchemy import update
+                from core.scale.models_db import OrchestrationRunDB
+                await session.execute(
+                    update(OrchestrationRunDB)
+                    .where(OrchestrationRunDB.run_id == run_id)
+                    .values(
+                        status="failed",
+                        ended_at=datetime.now(timezone.utc),
+                    )
+                )
+                await session.commit()
+        except Exception:
+            pass
+
+        try:
+            from core.scale.pubsub import RunEventPublisher
+            _pub = RunEventPublisher(redis, run_id)
+            await _pub.publish({"type": "orchestration_error", "error": str(exc)})
+            await _pub.publish_done()
+        except Exception:
+            pass
+
         raise
 
     finally:
@@ -446,6 +497,11 @@ async def worker_startup(ctx: dict) -> None:
     session_factory = build_session_factory(pg_engine)
     ctx["session_factory"] = session_factory
     ctx["pg_engine"] = pg_engine
+
+    # Wire session factory into the global worker context so all resolvers
+    # (agents, tools, MCP servers) can reach Postgres without explicit passing
+    from core.scale.context import set_session_factory
+    set_session_factory(session_factory)
 
     # Redis client (already provided by ARQ as ctx["redis"])
     redis = ctx["redis"]
